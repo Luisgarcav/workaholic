@@ -2,6 +2,26 @@ export const NODE_KINDS = ["folder", "project", "task"] as const
 
 export type NodeKind = (typeof NODE_KINDS)[number]
 
+export const NODE_KIND_ORDER: readonly NodeKind[] = ["folder", "project", "task"]
+
+const ALLOWED_CHILD_KINDS: Record<NodeKind, readonly NodeKind[]> = {
+  folder: ["folder", "project", "task"],
+  project: ["task"],
+  task: ["task"],
+}
+
+export function allowedChildKinds(parentKind: NodeKind | null): readonly NodeKind[] {
+  return parentKind === null ? ["folder", "task"] : ALLOWED_CHILD_KINDS[parentKind]
+}
+
+export function canNestNode(kind: NodeKind, parentKind: NodeKind | null): boolean {
+  return allowedChildKinds(parentKind).includes(kind)
+}
+
+export function nodeKindRank(kind: NodeKind): number {
+  return NODE_KIND_ORDER.indexOf(kind)
+}
+
 export interface WorkNode {
   id: string
   parentId: string | null

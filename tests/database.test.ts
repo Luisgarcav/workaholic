@@ -17,7 +17,7 @@ describe("WorkaholicDatabase", () => {
     db.close()
   })
 
-  test("creates a flexible tree and completes only the selected task", () => {
+  test("creates the canonical directory, project, task, and subtask hierarchy", () => {
     const folder = db.createNode("folder", "Client", null, 1)
     const project = db.createNode("project", "Redesign", folder.id, 2)
     const task = db.createNode("task", "Prepare proposal", project.id, 3)
@@ -40,8 +40,9 @@ describe("WorkaholicDatabase", () => {
   })
 
   test("moves a subtree to Trash and restores it", () => {
-    const project = db.createNode("project", "Project", null, 1)
-    const task = db.createNode("task", "Task", project.id, 2)
+    const folder = db.createNode("folder", "Client", null, 1)
+    const project = db.createNode("project", "Project", folder.id, 2)
+    const task = db.createNode("task", "Task", project.id, 3)
 
     db.trashNode(project.id, 50)
     expect(db.getNode(project.id)?.trashRootId).toBe(project.id)
@@ -51,6 +52,48 @@ describe("WorkaholicDatabase", () => {
     db.restoreTrashRoot(project.id, 60)
     expect(db.getNode(project.id)?.trashedAt).toBeNull()
     expect(db.getNode(task.id)?.trashedAt).toBeNull()
+  })
+
+  test("enforces directory, project, and task nesting rules", () => {
+    const folder = db.createNode("folder", "Work", null)
+    const nestedFolder = db.createNode("folder", "Client", folder.id)
+    const project = db.createNode("project", "Website", folder.id)
+    const looseRootTask = db.createNode("task", "Inbox", null)
+    const looseFolderTask = db.createNode("task", "Call client", nestedFolder.id)
+    const projectTask = db.createNode("task", "Build page", project.id)
+    const subtask = db.createNode("task", "Add tests", projectTask.id)
+
+    expect(looseRootTask.parentId).toBeNull()
+    expect(looseFolderTask.parentId).toBe(nestedFolder.id)
+    expect(subtask.parentId).toBe(projectTask.id)
+    expect(() => db.createNode("project", "Root project", null)).toThrow("inside a directory")
+    expect(() => db.createNode("folder", "Wrong folder", project.id)).toThrow("Directories can only")
+    expect(() => db.createNode("project", "Wrong project", projectTask.id)).toThrow("inside a directory")
+    expect(() => db.moveNode(project.id, projectTask.id)).toThrow("inside a directory")
+    expect(() => db.moveNode(folder.id, project.id)).toThrow("Directories can only")
+  })
+
+  test("moves items only into valid hierarchy destinations", () => {
+    const firstFolder = db.createNode("folder", "First", null)
+    const secondFolder = db.createNode("folder", "Second", null)
+    const project = db.createNode("project", "Project", firstFolder.id)
+    const task = db.createNode("task", "Task", null)
+
+    expect(db.moveNode(project.id, secondFolder.id).parentId).toBe(secondFolder.id)
+    expect(db.moveNode(task.id, project.id).parentId).toBe(project.id)
+    expect(() => db.moveNode(project.id, null)).toThrow("inside a directory")
+  })
+
+  test("requires a project parent directory to be restored first", () => {
+    const folder = db.createNode("folder", "Client", null)
+    const project = db.createNode("project", "Website", folder.id)
+
+    db.trashNode(project.id, 10)
+    db.trashNode(folder.id, 20)
+
+    expect(() => db.restoreTrashRoot(project.id, 30)).toThrow("Restore the parent directory")
+    expect(db.restoreTrashRoot(folder.id, 40).trashedAt).toBeNull()
+    expect(db.restoreTrashRoot(project.id, 50).parentId).toBe(folder.id)
   })
 
   test("protects a focused task and reconciles timer expiration", () => {
