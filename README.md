@@ -4,7 +4,9 @@ Workaholic is a local terminal task manager with a built-in Pomodoro timer. It l
 
 ## Features
 
-- Unlimited nesting with directories, projects, tasks, and subtasks.
+- Canonical `DIR → PRJ → TASK` organization with nested directories and subtasks.
+- Loose tasks at the root, directory, project, or task level.
+- Automatic `DIR`, `PRJ`, then `TASK` ordering at every level.
 - Clear tree connectors, collapsible branches, and explicit item labels.
 - Task completion, multiline task details, moving, renaming, and reordering.
 - A visible `[FOCUS]` marker on the task attached to the active Pomodoro.
@@ -58,7 +60,8 @@ Use `./dist/workaholic-macos-x64` on an Intel Mac. The resulting binary does not
 | `↑` / `↓` or `j` / `k` | Navigate |
 | `←` / `→` or `h` / `l` | Collapse or expand a branch |
 | `Space` | Complete or reopen a task |
-| `a` / `A` | Create a child or a root item |
+| `a` / `A` | Add the next item at the current level or at root |
+| `c` | Create a child; on a task, create a subtask |
 | `r` | Rename the selected item |
 | `e` | Edit task details; save with `Ctrl+S` |
 | `m` | Move the selected item |
@@ -72,6 +75,15 @@ Use `./dist/workaholic-macos-x64` on an Intel Mac. The resulting binary does not
 | `s` | Configure focus and break durations |
 | `?` | Open help |
 | `q` or `Ctrl+C` | Quit |
+
+## Organization rules
+
+- Root: directories or loose tasks.
+- Directory: nested directories, projects, or loose tasks.
+- Project: tasks.
+- Task: subtasks.
+
+When creating an item, Workaholic chooses the natural next type. Use `Tab`, `←`, or `→` in the creation dialog to switch between the types allowed at that location.
 
 ## Development
 

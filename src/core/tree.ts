@@ -1,4 +1,5 @@
 import type { FlatNode, WorkNode } from "./types.ts"
+import { nodeKindRank } from "./types.ts"
 
 export function flattenVisibleTree(nodes: WorkNode[], expanded: ReadonlySet<string>): FlatNode[] {
   const active = nodes.filter((node) => node.trashedAt === null)
@@ -11,7 +12,12 @@ export function flattenVisibleTree(nodes: WorkNode[], expanded: ReadonlySet<stri
   }
 
   for (const siblings of children.values()) {
-    siblings.sort((left, right) => left.position - right.position || left.createdAt - right.createdAt)
+    siblings.sort(
+      (left, right) =>
+        nodeKindRank(left.kind) - nodeKindRank(right.kind) ||
+        left.position - right.position ||
+        left.createdAt - right.createdAt,
+    )
   }
 
   const result: FlatNode[] = []

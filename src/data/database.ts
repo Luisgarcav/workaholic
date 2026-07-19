@@ -8,7 +8,7 @@ import type {
   TrashRoot,
   WorkNode,
 } from "../core/types.ts"
-import { DomainError, NODE_KINDS } from "../core/types.ts"
+import { canNestNode, DomainError, NODE_KINDS } from "../core/types.ts"
 
 interface NodeRow {
   id: string
@@ -181,7 +181,7 @@ export class WorkaholicDatabase {
   createNode(kind: NodeKind, titleValue: string, parentId: string | null, now = Date.now()): WorkNode {
     if (!NODE_KINDS.includes(kind)) throw new DomainError("INVALID_KIND", "Invalid item type")
     const title = cleanTitle(titleValue)
-    if (parentId !== null) this.requireActiveNode(parentId)
+    this.requireValidParent(kind, parentId)
 
     const id = crypto.randomUUID()
     this.db
@@ -228,8 +228,9 @@ export class WorkaholicDatabase {
     const node = this.requireActiveNode(id)
     if (node.parentId === parentId) return node
 
+    this.requireValidParent(node.kind, parentId)
+
     if (parentId !== null) {
-      this.requireActiveNode(parentId)
       const createsCycle = this.db
         .query(`
           WITH RECURSIVE descendants(id) AS (
@@ -265,10 +266,10 @@ export class WorkaholicDatabase {
     const siblings = this.db
       .query(`
         SELECT id, position FROM nodes
-        WHERE parent_id IS $parentId AND trashed_at IS NULL
+        WHERE parent_id IS $parentId AND kind = $kind AND trashed_at IS NULL
         ORDER BY position, created_at
       `)
-      .all({ parentId: node.parentId }) as Array<{ id: string; position: number }>
+      .all({ parentId: node.parentId, kind: node.kind }) as Array<{ id: string; position: number }>
     const currentIndex = siblings.findIndex((sibling) => sibling.id === id)
     const targetIndex = currentIndex + direction
     if (currentIndex < 0 || targetIndex < 0 || targetIndex >= siblings.length) return node
@@ -348,6 +349,9 @@ export class WorkaholicDatabase {
     const restore = this.db.transaction(() => {
       const parent = root.parentId ? this.getNode(root.parentId) : null
       const parentId = parent && parent.trashedAt === null ? parent.id : null
+      if (!canNestNode(root.kind, parentId === null ? null : parent!.kind)) {
+        throw new DomainError("INVALID_PARENT", "Restore the parent directory before restoring this item")
+      }
       const nextPosition = this.db
         .query("SELECT COALESCE(MAX(position) + 1, 0) AS value FROM nodes WHERE parent_id IS $parentId AND trashed_at IS NULL")
         .get({ parentId }) as { value: number }
@@ -545,5 +549,18 @@ export class WorkaholicDatabase {
     const node = this.requireNode(id)
     if (node.trashedAt !== null) throw new DomainError("NOT_FOUND", "The item is in Trash")
     return node
+  }
+
+  private requireValidParent(kind: NodeKind, parentId: string | null): WorkNode | null {
+    const parent = parentId === null ? null : this.requireActiveNode(parentId)
+    if (canNestNode(kind, parent?.kind ?? null)) return parent
+
+    const message =
+      kind === "folder"
+        ? "Directories can only be placed at root or inside another directory"
+        : kind === "project"
+          ? "Projects must be placed inside a directory"
+          : "That task destination is not allowed"
+    throw new DomainError("INVALID_PARENT", message)
   }
 }

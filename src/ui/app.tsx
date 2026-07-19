@@ -4,7 +4,7 @@ import { For, Show, createMemo, createSignal, onCleanup, onMount } from "solid-j
 import { useKeyboard, useRenderer, useTerminalDimensions } from "@opentui/solid"
 import type { WorkaholicDatabase } from "../data/database.ts"
 import type { FlatNode, NodeKind, TimerSession, TrashRoot, WorkNode } from "../core/types.ts"
-import { DomainError } from "../core/types.ts"
+import { allowedChildKinds, canNestNode, DomainError, nodeKindRank } from "../core/types.ts"
 import { clampSelection, flattenVisibleTree } from "../core/tree.ts"
 import { theme } from "./theme.ts"
 
@@ -40,8 +40,6 @@ const KIND_LABEL: Record<NodeKind, string> = {
   task: "task",
 }
 
-const KIND_ORDER: NodeKind[] = ["task", "project", "folder"]
-
 const COFFEE_ART = String.raw`    ( (
      ) )
   .--------.
@@ -53,9 +51,11 @@ export function WorkaholicApp(props: WorkaholicAppProps) {
   const renderer = useRenderer()
   const dimensions = useTerminalDimensions()
   const initialNodes = props.db.listNodes()
+  const initialExpanded = new Set(initialNodes.filter((node) => node.trashedAt === null).map((node) => node.id))
+  const initialVisibleNodes = flattenVisibleTree(initialNodes, initialExpanded)
   const [nodes, setNodes] = createSignal(initialNodes)
-  const [expanded, setExpanded] = createSignal(new Set(initialNodes.filter((node) => node.trashedAt === null).map((node) => node.id)))
-  const [selectedId, setSelectedId] = createSignal<string | null>(initialNodes.find((node) => node.trashedAt === null)?.id ?? null)
+  const [expanded, setExpanded] = createSignal(initialExpanded)
+  const [selectedId, setSelectedId] = createSignal<string | null>(initialVisibleNodes[0]?.id ?? null)
   const [view, setView] = createSignal<View>("tree")
   const [trashIndex, setTrashIndex] = createSignal(0)
   const [trashRoots, setTrashRoots] = createSignal(props.db.listTrashRoots())
@@ -95,6 +95,18 @@ export function WorkaholicApp(props: WorkaholicAppProps) {
   const moveTargets = createMemo(() => {
     const current = modal()
     return current?.type === "move" ? buildMoveTargets(nodes(), current.nodeId) : []
+  })
+  const invalidPlacementIds = createMemo(() => {
+    const active = nodes().filter((node) => node.trashedAt === null)
+    const byId = new Map(active.map((node) => [node.id, node]))
+    return new Set(
+      active
+        .filter((node) => {
+          const parent = node.parentId === null ? null : byId.get(node.parentId)
+          return (node.parentId !== null && !parent) || !canNestNode(node.kind, parent?.kind ?? null)
+        })
+        .map((node) => node.id),
+    )
   })
 
   const refresh = (preferredId?: string | null): void => {
@@ -178,9 +190,21 @@ export function WorkaholicApp(props: WorkaholicAppProps) {
     if (node.parentId) setSelectedId(node.parentId)
   }
 
-  const openCreate = (atRoot: boolean): void => {
+  const openCreate = (atRoot: boolean, forceChild = false): void => {
     inputDraft = ""
-    setModal({ type: "create", parentId: atRoot ? null : selectedNode()?.id ?? null, kind: "task", value: "" })
+    const selected = selectedNode()
+    const createSiblingTask = !atRoot && !forceChild && selected?.kind === "task"
+    const parent = atRoot
+      ? null
+      : createSiblingTask
+        ? selected?.parentId
+          ? nodes().find((node) => node.id === selected.parentId) ?? null
+          : null
+        : selected
+    const parentId = parent?.id ?? null
+    const kinds = allowedChildKinds(parent?.kind ?? null)
+    const kind = createSiblingTask ? "task" : parent?.kind === "folder" ? "project" : kinds[0]!
+    setModal({ type: "create", parentId, kind, value: "" })
   }
 
   const openSettings = (): void => {
@@ -290,8 +314,10 @@ export function WorkaholicApp(props: WorkaholicAppProps) {
     if (current.type === "create" && (key.name === "tab" || key.name === "left" || key.name === "right")) {
       key.preventDefault()
       const direction = key.name === "left" ? -1 : 1
-      const index = KIND_ORDER.indexOf(current.kind)
-      const kind = KIND_ORDER[(index + direction + KIND_ORDER.length) % KIND_ORDER.length]
+      const parentKind = current.parentId === null ? null : nodes().find((node) => node.id === current.parentId)?.kind ?? null
+      const kinds = allowedChildKinds(parentKind)
+      const index = Math.max(0, kinds.indexOf(current.kind))
+      const kind = kinds[(index + direction + kinds.length) % kinds.length]!
       setModal({ ...current, kind })
       return
     }
@@ -432,6 +458,13 @@ export function WorkaholicApp(props: WorkaholicAppProps) {
       openCreate(key.shift === true)
       return
     }
+    if (key.name === "c") {
+      key.preventDefault()
+      key.stopPropagation()
+      if (selectedNode()) openCreate(false, true)
+      else flash("Select an item before creating a child", "warning")
+      return
+    }
     if (key.name === "r") {
       const node = selectedNode()
       if (node) {
@@ -497,6 +530,10 @@ export function WorkaholicApp(props: WorkaholicAppProps) {
 
   onMount(() => {
     for (const expired of props.expiredTimers ?? []) notifyCompletion(expired, true)
+    const invalidCount = invalidPlacementIds().size
+    if (invalidCount > 0) {
+      flash(`${invalidCount} existing item${invalidCount === 1 ? " has" : "s have"} an invalid parent; select it and press m`, "warning")
+    }
     clockInterval = setInterval(() => {
       const now = Date.now()
       setClock(now)
@@ -525,7 +562,7 @@ export function WorkaholicApp(props: WorkaholicAppProps) {
       minHeight={6}
       paddingX={1}
     >
-      <Show when={flatNodes().length > 0} fallback={<text fg={theme.muted}>Empty. Press a to create your first task.</text>}>
+      <Show when={flatNodes().length > 0} fallback={<text fg={theme.muted}>Empty. Press a to create your first directory.</text>}>
         <Show when={treeWindow().hasBefore}>
           <text fg={theme.muted}>  ↑ more</text>
         </Show>
@@ -533,17 +570,18 @@ export function WorkaholicApp(props: WorkaholicAppProps) {
           {(node) => {
             const selected = () => selectedId() === node.id && view() === "tree"
             const focused = () => activeTimer()?.taskId === node.id
+            const invalid = () => invalidPlacementIds().has(node.id)
             const prefix = () => nodePrefix(node, expanded().has(node.id))
             const branch = () => treeBranch(node)
             return (
               <text
                 height={1}
-                fg={focused() ? theme.accentStrong : node.completedAt ? theme.muted : kindColor(node.kind)}
+                fg={invalid() ? theme.danger : focused() ? theme.accentStrong : node.completedAt ? theme.muted : kindColor(node.kind)}
                 bg={selected() ? theme.selected : theme.panel}
                 attributes={selected() || focused() ? TextAttributes.BOLD : node.completedAt ? TextAttributes.DIM : TextAttributes.NONE}
                 truncate
               >
-                {`${branch()}${prefix()} ${node.title}${focused() ? "  [FOCUS]" : ""}`}
+                {`${branch()}${prefix()} ${node.title}${focused() ? "  [FOCUS]" : ""}${invalid() ? "  [INVALID PARENT]" : ""}`}
               </text>
             )
           }}
@@ -705,7 +743,7 @@ export function WorkaholicApp(props: WorkaholicAppProps) {
           fallback={
             <text fg={theme.muted} truncate>
               {view() === "tree"
-                ? "↑↓/jk navigate · space complete · a add · e details · s timer settings · p focus · ? help"
+                ? "↑↓/jk navigate · space complete · a add next · c child · e details · s settings · p focus · ? help"
                 : "↑↓/jk move · u restore · d delete · t back · ? help"}
             </text>
           }
@@ -734,6 +772,7 @@ export function WorkaholicApp(props: WorkaholicAppProps) {
             >
               <Show when={current.type === "create"}>
                 <text fg={theme.muted}>{`Type: ${KIND_LABEL[current.type === "create" ? current.kind : "task"]}  (Tab/←/→ changes type)`}</text>
+                <text fg={theme.muted}>{`Destination: ${createDestinationLabel(nodes(), current.type === "create" ? current.parentId : null)}`}</text>
               </Show>
               <input
                 value={current.value}
@@ -879,17 +918,22 @@ export function WorkaholicApp(props: WorkaholicAppProps) {
               title=" Move into "
             >
               <Show when={targetWindow().hasBefore}><text fg={theme.muted}>↑ more</text></Show>
-              <For each={targetWindow().items}>
-                {(target) => (
-                  <text
-                    bg={moveTargets()[current.index]?.id === target.id ? theme.selected : theme.panelAlt}
-                    fg={moveTargets()[current.index]?.id === target.id ? theme.accentStrong : theme.text}
-                    truncate
-                  >
-                    {target.label}
-                  </text>
-                )}
-              </For>
+              <Show
+                when={targetWindow().items.length > 0}
+                fallback={<text fg={theme.warning}>No valid destination exists for this item type.</text>}
+              >
+                <For each={targetWindow().items}>
+                  {(target) => (
+                    <text
+                      bg={moveTargets()[current.index]?.id === target.id ? theme.selected : theme.panelAlt}
+                      fg={moveTargets()[current.index]?.id === target.id ? theme.accentStrong : theme.text}
+                      truncate
+                    >
+                      {target.label}
+                    </text>
+                  )}
+                </For>
+              </Show>
               <Show when={targetWindow().hasAfter}><text fg={theme.muted}>↓ more</text></Show>
               <text fg={theme.muted}>↑↓ chooses · Enter moves · Esc cancels</text>
             </box>
@@ -946,7 +990,9 @@ export function WorkaholicApp(props: WorkaholicAppProps) {
           <text fg={theme.text}>↑↓ / j k    navigate</text>
           <text fg={theme.text}>←→ / h l    collapse/expand branch</text>
           <text fg={theme.text}>Space        complete or reopen task</text>
-          <text fg={theme.text}>a / A        create child / create at root</text>
+          <text fg={theme.text}>a / A        add next item / add at root</text>
+          <text fg={theme.text}>c            create child (subtask on a task)</text>
+          <text fg={theme.text}>Hierarchy    DIR → PRJ → TASK (tasks may be loose)</text>
           <text fg={theme.text}>r · e · m    rename · edit details · move</text>
           <text fg={theme.text}>d · J / K    move to Trash · reorder down/up</text>
           <text fg={theme.text}>p · b · x    focus/pause · break · cancel timer</text>
@@ -1014,6 +1060,12 @@ function displayDataPath(path: string): string {
   return path
 }
 
+function createDestinationLabel(nodes: WorkNode[], parentId: string | null): string {
+  if (parentId === null) return "/ root"
+  const parent = nodes.find((node) => node.id === parentId)
+  return parent ? `${kindGlyph(parent.kind)} ${parent.title}` : "missing parent"
+}
+
 function windowItems<T>(items: T[], selectedIndex: number, capacity: number): { items: T[]; hasBefore: boolean; hasAfter: boolean } {
   if (items.length <= capacity) return { items, hasBefore: false, hasAfter: false }
   const safeIndex = clampSelection(selectedIndex, items.length)
@@ -1027,6 +1079,8 @@ function windowItems<T>(items: T[], selectedIndex: number, capacity: number): { 
 
 function buildMoveTargets(nodes: WorkNode[], movingId: string): MoveTarget[] {
   const active = nodes.filter((node) => node.trashedAt === null)
+  const moving = active.find((node) => node.id === movingId)
+  if (!moving) return []
   const descendants = new Set<string>([movingId])
   let changed = true
   while (changed) {
@@ -1055,11 +1109,15 @@ function buildMoveTargets(nodes: WorkNode[], movingId: string): MoveTarget[] {
     return parts.join(" / ")
   }
 
+  const rootTargets: MoveTarget[] = canNestNode(moving.kind, null) ? [{ id: null, label: "/ root" }] : []
   return [
-    { id: null, label: "/ root" },
+    ...rootTargets,
     ...active
-      .filter((node) => !descendants.has(node.id))
-      .sort((left, right) => pathFor(left).localeCompare(pathFor(right)))
+      .filter((node) => !descendants.has(node.id) && canNestNode(moving.kind, node.kind))
+      .sort(
+        (left, right) =>
+          nodeKindRank(left.kind) - nodeKindRank(right.kind) || pathFor(left).localeCompare(pathFor(right)),
+      )
       .map((node) => ({ id: node.id, label: `${kindGlyph(node.kind)} ${pathFor(node)}` })),
   ]
 }
